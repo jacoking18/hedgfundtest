@@ -5,6 +5,7 @@
 # - Page 2: Admin/Simulate
 # - Page 3: Investor View
 # - Flexible Deal Editor: play with factors, cycles, defaults
+# - Added: average factor, average deal size, average time per cycle
 # ---------------------------------------------
 
 from __future__ import annotations
@@ -71,30 +72,64 @@ class CycleRow:
     defaulted: bool
 
 
-def compute_flexible_cycles(start_capital: float, deals: List[Dict], capnow_early_rate: float):
+def compute_flexible_cycles(start_capital: float, deals: List[Dict], capnow_early_rate: float, bd_per_cycle: int, bd_per_year: int):
     S = float(start_capital)
     rows: List[CycleRow] = []
     total_profit = 0.0
     total_early = 0.0
+    used_days = 0
 
     for i, d in enumerate(deals, start=1):
-        f = d.get("factor", 1.40)
-        defaulted = d.get("default", False)
+        f = float(d.get("factor", 1.40))
+        defaulted = bool(d.get("default", False))
+        size_pct = float(d.get("size_pct", 1.0))  # portion of portfolio deployed this cycle (0..1)
+        days = int(d.get("days", bd_per_cycle))
+
+        # Remaining days for the year & effective r for this cycle
+        remaining_days = max(bd_per_year - used_days, 0)
+        if remaining_days <= 0:
+            # no time left in the year; treat as 0-length partial (no profit, no skim)
+            r_eff = 0.0
+        else:
+            # scale by the cycle's own days vs the standard cycle length
+            r_raw = days / bd_per_cycle if bd_per_cycle > 0 else 1.0
+            # cap by year remaining as a fraction of this cycle's days
+            r_cap = min(1.0, remaining_days / max(days, 1))
+            r_eff = max(0.0, min(1.0, r_raw * r_cap))
+
+        deployed_base = S * max(0.0, min(1.0, size_pct))
+
         if defaulted:
+            # Lose the deployed portion; the rest remains
             P = 0.0
             skim = 0.0
-            S_end = S * 0.0  # lose all principal
+            reinvested = 0.0
+            S_end = S - deployed_base
         else:
-            P = S * (f - 1.0)
-            skim = capnow_early_rate * P
+            # Profit only on deployed portion and scaled by r_eff
+            P = deployed_base * (f - 1.0) * r_eff
+            skim = capnow_early_rate * P if abs(r_eff - 1.0) < 1e-9 else 0.0
             reinvested = (P - skim)
             S_end = S + reinvested
             total_profit += P
             total_early += skim
-        rows.append(CycleRow(i, S, f, P, skim, (P - skim), S_end, defaulted))
+
+        rows.append(CycleRow(i, S, f, P, skim, reinvested, S_end, defaulted))
         S = S_end
+        used_days += min(days, remaining_days)
 
     timeline_df = pd.DataFrame([asdict(r) for r in rows])
+    # add the user-entered knobs for transparency
+    if len(deals) > 0:
+        meta = pd.DataFrame({
+            "cycle": list(range(1, len(deals)+1)),
+            "factor": [float(d.get("factor", 1.40)) for d in deals],
+            "size_pct": [float(d.get("size_pct", 1.0)) for d in deals],
+            "days": [int(d.get("days", bd_per_cycle)) for d in deals],
+            "defaulted": [bool(d.get("default", False)) for d in deals],
+        })
+        timeline_df = meta.merge(timeline_df, on="cycle", suffixes=("_cfg", ""))
+
     return timeline_df, total_profit, total_early
 
 
@@ -207,20 +242,63 @@ def page_admin(target_capital: float):
     # Flexible deal editor
     st.subheader("Deal Editor")
     deals = st.session_state.get("deals", [
-        {"factor": 1.40, "default": False},
-        {"factor": 1.40, "default": False},
-        {"factor": 14.60, "default": False},
-        {"factor": 1.40, "default": True},
+        {"factor": 1.40, "size_pct": 1.0, "days": DEFAULTS.BD_PER_CYCLE, "default": False},
+        {"factor": 1.40, "size_pct": 1.0, "days": DEFAULTS.BD_PER_CYCLE, "default": False},
+        {"factor": 14.60, "size_pct": 1.0, "days": DEFAULTS.BD_PER_CYCLE, "default": False},
+        {"factor": 1.40, "size_pct": 1.0, "days": DEFAULTS.BD_PER_CYCLE, "default": True},
     ])
     deals_df = pd.DataFrame(deals)
-    edited = st.data_editor(deals_df, num_rows="dynamic", use_container_width=True, key="deals_editor")
+    edited = st.data_editor(
+        deals_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="deals_editor",
+        column_config={
+            "factor": st.column_config.NumberColumn("factor", help="Deal factor e.g., 1.40 or 14.6", step=0.01, format="%.2f"),
+            "size_pct": st.column_config.NumberColumn("size % (0..1)", help="Portion of portfolio deployed this cycle", step=0.05, min_value=0.0, max_value=1.0, format="%.2f"),
+            "days": st.column_config.NumberColumn("biz days", help="Business days for this cycle", step=5, min_value=1),
+            "default": st.column_config.CheckboxColumn("default", help="Lose deployed portion this cycle"),
+        }
+    )
     st.session_state["deals"] = edited.to_dict(orient="records")
 
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
     st.dataframe(cap_table, use_container_width=True)
 
-    timeline_df, total_profit, total_early = compute_flexible_cycles(target_capital, st.session_state["deals"], DEFAULTS.CAPNOW_EARLY)
-    st.dataframe(timeline_df, use_container_width=True)
+    timeline_df, total_profit, total_early = compute_flexible_cycles(
+        target_capital,
+        st.session_state["deals"],
+        DEFAULTS.CAPNOW_EARLY,
+        DEFAULTS.BD_PER_CYCLE,
+        DEFAULTS.BD_PER_YEAR,
+    )
+    # Pretty formatting for timeline with the new fields
+    pretty_tl = timeline_df.copy()
+    if not pretty_tl.empty:
+        for col in ["start_principal", "profit", "capnow_early", "reinvested", "end_principal"]:
+            pretty_tl[col] = pretty_tl[col].map(dollars)
+        if "size_pct" in pretty_tl.columns:
+            pretty_tl["size_pct"] = pretty_tl["size_pct"].map(percent)
+        if "days" in pretty_tl.columns:
+            pretty_tl["days"] = pretty_tl["days"].astype(int)
+        if "factor_cfg" in pretty_tl.columns:
+            pretty_tl["factor_cfg"] = pretty_tl["factor_cfg"].map(lambda x: f"{x:.2f}")
+        if "defaulted" in pretty_tl.columns:
+            pretty_tl["defaulted"] = pretty_tl["defaulted"].map(lambda v: "❌ default" if v else "—")
+    st.dataframe(pretty_tl, use_container_width=True)
+
+    # Show averages
+    if not timeline_df.empty:
+        avg_factor = timeline_df["factor"].mean()
+        avg_profit = timeline_df["profit"].mean()
+        avg_days = pd.DataFrame(st.session_state["deals"]).get("days", pd.Series([DEFAULTS.BD_PER_CYCLE]*len(timeline_df))).mean()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Average Factor", f"{avg_factor:.2f}")
+        with c2:
+            st.metric("Avg Deal Profit", dollars(avg_profit))
+        with c3:
+            st.metric("Avg Cycle Days", f"{avg_days:.0f} days")
 
     investors_total, capnow_total = final_distribution(target_capital, total_profit, total_early, DEFAULTS.CAPNOW_TOTAL, DEFAULTS.MGMT_FEE_RATE)
     st.metric("Investors Total", dollars(investors_total))
@@ -240,7 +318,13 @@ def page_investor_view(target_capital: float):
     st.dataframe(cap_table, use_container_width=True)
 
     deals = st.session_state.get("deals", [])
-    timeline_df, total_profit, total_early = compute_flexible_cycles(target_capital, deals, DEFAULTS.CAPNOW_EARLY)
+    timeline_df, total_profit, total_early = compute_flexible_cycles(
+        target_capital,
+        deals,
+        DEFAULTS.CAPNOW_EARLY,
+        DEFAULTS.BD_PER_CYCLE,
+        DEFAULTS.BD_PER_YEAR,
+    )
     investors_total, _ = final_distribution(target_capital, total_profit, total_early, DEFAULTS.CAPNOW_TOTAL, DEFAULTS.MGMT_FEE_RATE)
     payouts_df = compute_investor_payouts(cap_table, investors_total)
     st.dataframe(payouts_df, use_container_width=True)
