@@ -1,9 +1,10 @@
 # streamlit_app.py
 # ---------------------------------------------
 # Portfolio Syndication Simulator (Model B)
-# - Page 1: Capital Raise (add investors until target reached)
-# - Page 2: Admin/Simulate (cycle math, payouts)
-# - Page 3: Investor View (simple investor-facing cap table + payouts)
+# - Page 1: Capital Raise
+# - Page 2: Admin/Simulate
+# - Page 3: Investor View
+# - Flexible Deal Editor: play with factors, cycles, defaults
 # ---------------------------------------------
 
 from __future__ import annotations
@@ -62,38 +63,36 @@ def _init_session():
 class CycleRow:
     cycle: int
     start_principal: float
+    factor: float
     profit: float
     capnow_early: float
     reinvested: float
     end_principal: float
+    defaulted: bool
 
 
-def compute_cycles(start_capital: float, factor: float, bd_cycle: int, bd_year: int, capnow_early_rate: float):
-    n_full = bd_year // bd_cycle
-    remainder = bd_year - n_full * bd_cycle
-    r_last = remainder / bd_cycle if bd_cycle > 0 else 0.0
-
+def compute_flexible_cycles(start_capital: float, deals: List[Dict], capnow_early_rate: float):
     S = float(start_capital)
     rows: List[CycleRow] = []
-    profits_full = []
-    early_skims = []
+    total_profit = 0.0
+    total_early = 0.0
 
-    for i in range(1, n_full + 1):
-        P = S * (factor - 1.0)
-        skim = capnow_early_rate * P
-        reinvested = (P - skim)
-        S_end = S + reinvested
-        rows.append(CycleRow(i, S, P, skim, reinvested, S_end))
-        profits_full.append(P)
-        early_skims.append(skim)
+    for i, d in enumerate(deals, start=1):
+        f = d.get("factor", 1.40)
+        defaulted = d.get("default", False)
+        if defaulted:
+            P = 0.0
+            skim = 0.0
+            S_end = S * 0.0  # lose all principal
+        else:
+            P = S * (f - 1.0)
+            skim = capnow_early_rate * P
+            reinvested = (P - skim)
+            S_end = S + reinvested
+            total_profit += P
+            total_early += skim
+        rows.append(CycleRow(i, S, f, P, skim, (P - skim), S_end, defaulted))
         S = S_end
-
-    P_partial = S * (factor - 1.0) * r_last
-    if r_last > 0:
-        rows.append(CycleRow(n_full + 1, S, P_partial, 0.0, P_partial, S + P_partial))
-
-    total_profit = sum(profits_full) + P_partial
-    total_early = sum(early_skims)
 
     timeline_df = pd.DataFrame([asdict(r) for r in rows])
     return timeline_df, total_profit, total_early
@@ -150,8 +149,9 @@ class UI:
         st.markdown("---")
 
 # ===============================
-# BIN 5 — PAGE 1: CAPITAL RAISE
+# BIN 5 — PAGES
 # ===============================
+
 def page_raise_capital(target_capital: float):
     UI.header("Page 1 — Raise Capital")
     investors: List[Dict] = st.session_state[INVESTORS_KEY]
@@ -194,52 +194,42 @@ def page_raise_capital(target_capital: float):
     st.progress(min(total / target_capital, 1.0), text=f"{dollars(total)} / {dollars(target_capital)}")
 
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    show_df = cap_table.copy()
-    show_df["Contribution"] = show_df["Contribution"].map(dollars)
-    show_df["% Ownership"] = show_df["% Ownership"].map(percent)
-    show_df["Mgmt Fee"] = show_df["Mgmt Fee"].map(dollars)
-    show_df["Net Investable"] = show_df["Net Investable"].map(dollars)
-    st.dataframe(show_df, use_container_width=True)
+    st.dataframe(cap_table, use_container_width=True)
 
-    if st.button("Reset Roster", disabled=locked):
-        st.session_state[INVESTORS_KEY] = []
-        st.rerun()
 
-# ===============================
-# BIN 6 — PAGE 2: ADMIN
-# ===============================
 def page_admin(target_capital: float):
     UI.header("Page 2 — Admin & Simulation")
     investors: List[Dict] = st.session_state[INVESTORS_KEY]
     if not investors:
         st.info("No investors yet.")
         return
-    cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    show_table = cap_table.copy()
-    show_table["Contribution"] = show_table["Contribution"].map(dollars)
-    show_table["% Ownership"] = show_table["% Ownership"].map(percent)
-    show_table["Mgmt Fee"] = show_table["Mgmt Fee"].map(dollars)
-    show_table["Net Investable"] = show_table["Net Investable"].map(dollars)
-    st.dataframe(show_table, use_container_width=True)
 
-    timeline_df, total_profit, total_early = compute_cycles(target_capital, DEFAULTS.FACTOR, DEFAULTS.BD_PER_CYCLE, DEFAULTS.BD_PER_YEAR, DEFAULTS.CAPNOW_EARLY)
+    # Flexible deal editor
+    st.subheader("Deal Editor")
+    deals = st.session_state.get("deals", [
+        {"factor": 1.40, "default": False},
+        {"factor": 1.40, "default": False},
+        {"factor": 14.60, "default": False},
+        {"factor": 1.40, "default": True},
+    ])
+    deals_df = pd.DataFrame(deals)
+    edited = st.data_editor(deals_df, num_rows="dynamic", use_container_width=True, key="deals_editor")
+    st.session_state["deals"] = edited.to_dict(orient="records")
+
+    cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
+    st.dataframe(cap_table, use_container_width=True)
+
+    timeline_df, total_profit, total_early = compute_flexible_cycles(target_capital, st.session_state["deals"], DEFAULTS.CAPNOW_EARLY)
     st.dataframe(timeline_df, use_container_width=True)
+
     investors_total, capnow_total = final_distribution(target_capital, total_profit, total_early, DEFAULTS.CAPNOW_TOTAL, DEFAULTS.MGMT_FEE_RATE)
     st.metric("Investors Total", dollars(investors_total))
     st.metric("CapNow Total", dollars(capnow_total))
 
     payouts_df = compute_investor_payouts(cap_table, investors_total)
-    show_payouts = payouts_df.copy()
-    show_payouts["Contribution"] = show_payouts["Contribution"].map(dollars)
-    show_payouts["% Ownership"] = show_payouts["% Ownership"].map(percent)
-    show_payouts["Mgmt Fee"] = show_payouts["Mgmt Fee"].map(dollars)
-    show_payouts["Payout"] = show_payouts["Payout"].map(dollars)
-    show_payouts["ROI %"] = show_payouts["ROI %"].map(lambda x: f"{x:.2f}%")
-    st.dataframe(show_payouts, use_container_width=True)
+    st.dataframe(payouts_df, use_container_width=True)
 
-# ===============================
-# BIN 7 — PAGE 3: INVESTOR VIEW
-# ===============================
+
 def page_investor_view(target_capital: float):
     UI.header("Page 3 — Investor View")
     investors: List[Dict] = st.session_state[INVESTORS_KEY]
@@ -247,32 +237,21 @@ def page_investor_view(target_capital: float):
         st.info("No investors yet.")
         return
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    show_table = cap_table.copy()
-    show_table["Contribution"] = show_table["Contribution"].map(dollars)
-    show_table["% Ownership"] = show_table["% Ownership"].map(percent)
-    show_table["Mgmt Fee"] = show_table["Mgmt Fee"].map(dollars)
-    show_table["Net Investable"] = show_table["Net Investable"].map(dollars)
-    st.dataframe(show_table, use_container_width=True)
+    st.dataframe(cap_table, use_container_width=True)
 
-    timeline_df, total_profit, total_early = compute_cycles(target_capital, DEFAULTS.FACTOR, DEFAULTS.BD_PER_CYCLE, DEFAULTS.BD_PER_YEAR, DEFAULTS.CAPNOW_EARLY)
+    deals = st.session_state.get("deals", [])
+    timeline_df, total_profit, total_early = compute_flexible_cycles(target_capital, deals, DEFAULTS.CAPNOW_EARLY)
     investors_total, _ = final_distribution(target_capital, total_profit, total_early, DEFAULTS.CAPNOW_TOTAL, DEFAULTS.MGMT_FEE_RATE)
     payouts_df = compute_investor_payouts(cap_table, investors_total)
-    show_payouts = payouts_df.copy()
-    show_payouts["Contribution"] = show_payouts["Contribution"].map(dollars)
-    show_payouts["% Ownership"] = show_payouts["% Ownership"].map(percent)
-    show_payouts["Mgmt Fee"] = show_payouts["Mgmt Fee"].map(dollars)
-    show_payouts["Payout"] = show_payouts["Payout"].map(dollars)
-    show_payouts["ROI %"] = show_payouts["ROI %"].map(lambda x: f"{x:.2f}%")
-    st.subheader("Investor Payouts")
-    st.dataframe(show_payouts, use_container_width=True)
+    st.dataframe(payouts_df, use_container_width=True)
 
-    names = payouts_df["Name"].tolist()
-    choice = st.selectbox("Select investor", names)
-    row = payouts_df[payouts_df["Name"] == choice].iloc[0]
-    st.metric("Contribution", dollars(row["Contribution"]))
-    st.metric("Ownership", percent(row["% Ownership"]))
-    st.metric("Payout", dollars(row["Payout"]))
-    st.metric("ROI %", f"{row['ROI %']:.2f}%")
+    if not payouts_df.empty:
+        choice = st.selectbox("Select investor", payouts_df["Name"].tolist())
+        row = payouts_df[payouts_df["Name"] == choice].iloc[0]
+        st.metric("Contribution", dollars(row["Contribution"]))
+        st.metric("Ownership", percent(row["% Ownership"]))
+        st.metric("Payout", dollars(row["Payout"]))
+        st.metric("ROI %", f"{row['ROI %']:.2f}%")
 
 # ===============================
 # MAIN APP
@@ -283,30 +262,6 @@ def main():
 
     page = st.sidebar.radio("Go to", ["Page 1 — Raise Capital", "Page 2 — Admin & Simulation", "Page 3 — Investor View"])
     target = DEFAULTS.TARGET_CAPITAL
-
-    with st.sidebar.expander("Quick Demo Roster"):
-        if st.button("Load 20×$5,000 (exact $100k)"):
-            st.session_state[INVESTORS_KEY] = [{"name": f"Investor {i+1}", "contribution": 5_000.0} for i in range(20)]
-            st.session_state[LOCKED_KEY] = False
-            st.rerun()
-        if st.button("Clear Roster"):
-            st.session_state[INVESTORS_KEY] = []
-            st.session_state[LOCKED_KEY] = False
-            st.rerun()
-        st.markdown("**Edit roster (name & contribution)**")
-        current_df = pd.DataFrame(st.session_state[INVESTORS_KEY])
-        edited = st.data_editor(current_df, num_rows="dynamic", use_container_width=True, key="roster_editor")
-        if st.button("Save roster changes"):
-            new_list: List[Dict] = []
-            if not edited.empty:
-                for _, r in edited.iterrows():
-                    nm = str(r.get("name", "")).strip()
-                    contrib = float(r.get("contribution", 0) or 0)
-                    if nm and contrib > 0:
-                        new_list.append({"name": nm, "contribution": round(contrib, 2)})
-            st.session_state[INVESTORS_KEY] = new_list
-            st.session_state[LOCKED_KEY] = False
-            st.rerun()
 
     if page.startswith("Page 1"):
         page_raise_capital(target)
