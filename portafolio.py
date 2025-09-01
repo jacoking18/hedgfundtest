@@ -111,7 +111,6 @@ def build_cap_table(investors: List[Dict], target_capital: float, mgmt_fee_rate:
     df = pd.DataFrame(investors)
     if df.empty:
         return pd.DataFrame(columns=["Name", "Contribution", "% Ownership", "Mgmt Fee", "Net Investable"])
-    # compute using native column names
     df["% Ownership"] = df["contribution"] / target_capital
     df["Mgmt Fee"] = df["contribution"] * mgmt_fee_rate
     df["Net Investable"] = df["contribution"]
@@ -131,7 +130,10 @@ def compute_investor_payouts(cap_table: pd.DataFrame, investors_total_distributi
 
 
 def dollars(x: float) -> str:
-    return f"${x:,.2f}"
+    return f"${x:,.0f}" if abs(x) >= 1000 else f"${x:,.2f}"
+
+def percent(x: float) -> str:
+    return f"{x*100:.2f}%"
 
 # ===============================
 # BIN 4 — UI COMPONENTS
@@ -192,7 +194,12 @@ def page_raise_capital(target_capital: float):
     st.progress(min(total / target_capital, 1.0), text=f"{dollars(total)} / {dollars(target_capital)}")
 
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    st.dataframe(cap_table, use_container_width=True)
+    show_df = cap_table.copy()
+    show_df["Contribution"] = show_df["Contribution"].map(dollars)
+    show_df["% Ownership"] = show_df["% Ownership"].map(percent)
+    show_df["Mgmt Fee"] = show_df["Mgmt Fee"].map(dollars)
+    show_df["Net Investable"] = show_df["Net Investable"].map(dollars)
+    st.dataframe(show_df, use_container_width=True)
 
     if st.button("Reset Roster", disabled=locked):
         st.session_state[INVESTORS_KEY] = []
@@ -208,7 +215,12 @@ def page_admin(target_capital: float):
         st.info("No investors yet.")
         return
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    st.dataframe(cap_table, use_container_width=True)
+    show_table = cap_table.copy()
+    show_table["Contribution"] = show_table["Contribution"].map(dollars)
+    show_table["% Ownership"] = show_table["% Ownership"].map(percent)
+    show_table["Mgmt Fee"] = show_table["Mgmt Fee"].map(dollars)
+    show_table["Net Investable"] = show_table["Net Investable"].map(dollars)
+    st.dataframe(show_table, use_container_width=True)
 
     timeline_df, total_profit, total_early = compute_cycles(target_capital, DEFAULTS.FACTOR, DEFAULTS.BD_PER_CYCLE, DEFAULTS.BD_PER_YEAR, DEFAULTS.CAPNOW_EARLY)
     st.dataframe(timeline_df, use_container_width=True)
@@ -217,7 +229,13 @@ def page_admin(target_capital: float):
     st.metric("CapNow Total", dollars(capnow_total))
 
     payouts_df = compute_investor_payouts(cap_table, investors_total)
-    st.dataframe(payouts_df, use_container_width=True)
+    show_payouts = payouts_df.copy()
+    show_payouts["Contribution"] = show_payouts["Contribution"].map(dollars)
+    show_payouts["% Ownership"] = show_payouts["% Ownership"].map(percent)
+    show_payouts["Mgmt Fee"] = show_payouts["Mgmt Fee"].map(dollars)
+    show_payouts["Payout"] = show_payouts["Payout"].map(dollars)
+    show_payouts["ROI %"] = show_payouts["ROI %"].map(lambda x: f"{x:.2f}%")
+    st.dataframe(show_payouts, use_container_width=True)
 
 # ===============================
 # BIN 7 — PAGE 3: INVESTOR VIEW
@@ -229,17 +247,30 @@ def page_investor_view(target_capital: float):
         st.info("No investors yet.")
         return
     cap_table = build_cap_table(investors, target_capital, DEFAULTS.MGMT_FEE_RATE)
-    st.dataframe(cap_table, use_container_width=True)
+    show_table = cap_table.copy()
+    show_table["Contribution"] = show_table["Contribution"].map(dollars)
+    show_table["% Ownership"] = show_table["% Ownership"].map(percent)
+    show_table["Mgmt Fee"] = show_table["Mgmt Fee"].map(dollars)
+    show_table["Net Investable"] = show_table["Net Investable"].map(dollars)
+    st.dataframe(show_table, use_container_width=True)
+
     timeline_df, total_profit, total_early = compute_cycles(target_capital, DEFAULTS.FACTOR, DEFAULTS.BD_PER_CYCLE, DEFAULTS.BD_PER_YEAR, DEFAULTS.CAPNOW_EARLY)
     investors_total, _ = final_distribution(target_capital, total_profit, total_early, DEFAULTS.CAPNOW_TOTAL, DEFAULTS.MGMT_FEE_RATE)
     payouts_df = compute_investor_payouts(cap_table, investors_total)
+    show_payouts = payouts_df.copy()
+    show_payouts["Contribution"] = show_payouts["Contribution"].map(dollars)
+    show_payouts["% Ownership"] = show_payouts["% Ownership"].map(percent)
+    show_payouts["Mgmt Fee"] = show_payouts["Mgmt Fee"].map(dollars)
+    show_payouts["Payout"] = show_payouts["Payout"].map(dollars)
+    show_payouts["ROI %"] = show_payouts["ROI %"].map(lambda x: f"{x:.2f}%")
     st.subheader("Investor Payouts")
-    st.dataframe(payouts_df, use_container_width=True)
+    st.dataframe(show_payouts, use_container_width=True)
+
     names = payouts_df["Name"].tolist()
     choice = st.selectbox("Select investor", names)
     row = payouts_df[payouts_df["Name"] == choice].iloc[0]
     st.metric("Contribution", dollars(row["Contribution"]))
-    st.metric("Ownership", f"{row['% Ownership']*100:.2f}%")
+    st.metric("Ownership", percent(row["% Ownership"]))
     st.metric("Payout", dollars(row["Payout"]))
     st.metric("ROI %", f"{row['ROI %']:.2f}%")
 
