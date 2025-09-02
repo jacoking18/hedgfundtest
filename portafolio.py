@@ -320,6 +320,16 @@ def ledger_outstanding_principal() -> float:
         out += max(0.0, deal["amount"] - principal_repaid)
     return out
 
+def ledger_to_be_collected() -> float:
+    """Remaining scheduled collections (principal + profit) not yet received.
+       Excludes defaulted deals (no future cash expected)."""
+    rem = 0.0
+    for deal in st.session_state[KEY_LEDGER]:
+        if deal.get("default", False):
+            continue
+        rem += max(0.0, deal.get("gross", 0.0) - deal.get("collected", 0.0))
+    return rem
+
 # ===============================
 # CAP TABLE / PAYOUTS
 # ===============================
@@ -523,11 +533,12 @@ def page_admin():
         port = st.session_state[KEY_PORT]
         if not port.get("launched", False):
             st.info("Launch the portfolio in Raise Capital to initialize $100,000 cash.")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         with c1: st.metric("Day", st.session_state[KEY_DAY])
         with c2: st.metric("Available Cash", dollars(st.session_state[KEY_CASH]))
         with c3: st.metric("Outstanding Principal", dollars(ledger_outstanding_principal()))
-        with c4: st.metric("CapNow Early Skims", dollars(st.session_state[KEY_SKIM]))
+        with c4: st.metric("To Be Collected", dollars(ledger_to_be_collected()))
+        with c5: st.metric("CapNow Early Skims", dollars(st.session_state[KEY_SKIM]))
 
         st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
         # Controls: advance day & add deal
