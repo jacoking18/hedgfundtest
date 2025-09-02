@@ -1,12 +1,12 @@
 # streamlit_app.py
 # ------------------------------------------------------------
 # CapNow — Portfolio Syndication Simulator (Model B)
-# FULL SYSTEM • Dark‑Blue Futuristic Theme • Role Login (Admin/Investor)
-# - Admin: Raise Capital, Participation Queue, Deal Studio, Run Simulation
-# - Investor: Participate, My Portfolio (read-only)
-# - Model B: 20% early skim on completed deals, 40% total to CapNow / 60% to investors, losses absorbed by portfolio
-# - Fees: $500 flat per investor (one-time, billed on top; investable principal unchanged)
-# - Celebration: balloons + gloves pop when raise hits $100k
+# FULL SYSTEM • Dark‑Blue Futuristic Theme • Role Login (click-to-enter)
+# Adds CONTINUOUS CASH FLOW LEDGER (daily collections & redeploy)
+# - Admin: Raise Capital, Queue, Deal Studio (discrete), Ledger (continuous), Run / Finalize
+# - Investor: Participate, My Portfolio
+# - Model B: 20% early skim when a deal COMPLETES; 40% total to CapNow / 60% to investors at maturity; portfolio absorbs losses
+# - Fees: $500 flat per investor (on top; investable unchanged)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -36,13 +36,10 @@ CUSTOM_CSS = """
   --border: #1f2b55;     /* soft border */
 }
 
-/***** animated grid background *****/
 [data-testid="stAppViewContainer"] {
   color: var(--text);
   background: radial-gradient(1000px 600px at 15% -10%, #0e1a3b 0%, var(--bg0) 60%);
 }
-
-/* moving blocks */
 [data-testid="stAppViewContainer"]:before,
 [data-testid="stAppViewContainer"]:after {
   content:""; position: fixed; inset: 0; pointer-events: none;
@@ -115,8 +112,14 @@ DEFAULTS = AppDefaults()
 KEY_AUTH = "auth"
 KEY_INVESTORS = "investors"
 KEY_REQUESTS = "requests"
-KEY_DEALS = "deals"
+KEY_DEALS = "deals"              # discrete studio list
 KEY_PORT = "portfolio"
+
+# Continuous ledger state
+KEY_LEDGER = "ledger_deals"       # list of deals in ledger
+KEY_DAY = "ledger_day"            # current business day index (0..252)
+KEY_CASH = "ledger_cash"          # available cash
+KEY_SKIM = "ledger_early_skim"    # capnow early skim accumulated
 
 
 def init_state():
@@ -130,6 +133,14 @@ def init_state():
         st.session_state[KEY_DEALS] = []
     if KEY_PORT not in st.session_state:
         st.session_state[KEY_PORT] = {"launched": False}
+    if KEY_LEDGER not in st.session_state:
+        st.session_state[KEY_LEDGER] = []
+    if KEY_DAY not in st.session_state:
+        st.session_state[KEY_DAY] = 0
+    if KEY_CASH not in st.session_state:
+        st.session_state[KEY_CASH] = 0.0
+    if KEY_SKIM not in st.session_state:
+        st.session_state[KEY_SKIM] = 0.0
 
 # ===============================
 # UTIL — MONEY / PERCENT
@@ -148,7 +159,7 @@ def percent(x: float) -> str:
         return "0.00%"
 
 # ===============================
-# MODEL B — ENGINE
+# MODEL B — DISCRETE ENGINE (kept for summary sim)
 # ===============================
 @dataclass
 class CycleRow:
@@ -210,6 +221,106 @@ def final_splits(initial_capital: float, total_profit: float, total_early: float
     return investors_total, capnow_total, capnow_final_component
 
 # ===============================
+# CONTINUOUS CASH FLOW LEDGER
+# ===============================
+# Deal fields: id,label,amount,factor,term,start_day,end_day,daily,gross,collected,completed,default
+
+
+def ledger_add_deal(label: str, amount: float, factor: float, term_days: int, start_day: int, default: bool = False) -> bool:
+    cash = st.session_state[KEY_CASH]
+    if amount > cash:
+        st.warning("Not enough available cash to start this deal.")
+        return False
+    end_day = start_day + term_days
+    daily = amount * factor / term_days
+    gross = amount * factor
+    deal = {
+        "id": len(st.session_state[KEY_LEDGER]) + 1,
+        "label": label or f"Deal {len(st.session_state[KEY_LEDGER]) + 1}",
+        "amount": float(amount),
+        "factor": float(factor),
+        "term": int(term_days),
+        "start_day": int(start_day),
+        "end_day": int(end_day),
+        "daily": float(daily),
+        "gross": float(gross),
+        "collected": 0.0,
+        "completed": False,
+        "default": bool(default),
+    }
+    st.session_state[KEY_LEDGER].append(deal)
+    st.session_state[KEY_CASH] = cash - amount
+    return True
+
+
+def ledger_advance_to_day(target_day: int):
+    day = st.session_state[KEY_DAY]
+    if target_day < day:
+        st.info("You moved backward; no changes applied.")
+        st.session_state[KEY_DAY] = target_day
+        return
+    cash = st.session_state[KEY_CASH]
+    skim = st.session_state[KEY_SKIM]
+
+    for d in range(day + 1, target_day + 1):
+        for deal in st.session_state[KEY_LEDGER]:
+            if deal["completed"]:
+                continue
+            if deal["default"]:
+                # If defaulted, lose the remaining principal immediately at its start day
+                if d == max(day + 1, deal["start_day"]):
+                    # nothing added back; cash already reduced at start
+                    deal["completed"] = True
+                continue
+            if d > deal["start_day"] and d <= deal["end_day"]:
+                # collect a daily repayment
+                to_add = deal["daily"]
+                # cap so we don't over-collect beyond gross
+                if deal["collected"] + to_add > deal["gross"]:
+                    to_add = deal["gross"] - deal["collected"]
+                cash += to_add
+                deal["collected"] += to_add
+            if d >= deal["end_day"] and not deal["completed"]:
+                # mark complete and skim 20% of profit from this deal
+                profit = max(0.0, deal["gross"] - deal["amount"])  # full profit for the deal
+                early = DEFAULTS.CAPNOW_EARLY * profit
+                # the profit was dripped into cash; transfer the skim out now
+                cash -= early
+                skim += early
+                deal["completed"] = True
+    st.session_state[KEY_CASH] = cash
+    st.session_state[KEY_SKIM] = skim
+    st.session_state[KEY_DAY] = target_day
+
+
+def ledger_dataframe() -> pd.DataFrame:
+    if not st.session_state[KEY_LEDGER]:
+        return pd.DataFrame(columns=["id","label","amount","factor","term","start_day","end_day","daily","gross","collected","days_left","completed","default"])    
+    df = pd.DataFrame(st.session_state[KEY_LEDGER])
+    # computed fields
+    df["days_left"] = (df["end_day"] - st.session_state[KEY_DAY]).clip(lower=0)
+    return df
+
+
+def ledger_realized_profit() -> float:
+    # realized profit = collected minus principal collected (capped at principal per deal)
+    prof = 0.0
+    for deal in st.session_state[KEY_LEDGER]:
+        collected = deal["collected"]
+        principal_part = min(collected, deal["amount"])  # principal collected so far
+        profit_part = max(0.0, collected - principal_part)
+        prof += profit_part
+    return prof
+
+
+def ledger_outstanding_principal() -> float:
+    out = 0.0
+    for deal in st.session_state[KEY_LEDGER]:
+        principal_repaid = min(deal["collected"], deal["amount"])
+        out += max(0.0, deal["amount"] - principal_repaid)
+    return out
+
+# ===============================
 # CAP TABLE / PAYOUTS
 # ===============================
 
@@ -235,37 +346,31 @@ def payouts_df(cap_table: pd.DataFrame, investors_total_distribution: float) -> 
     return out[["Name", "Email", "Contribution", "% Ownership", "Payout", "ROI %", "Entry Fee ($500)"]]
 
 # ===============================
-# AUTH (demo)
+# AUTH — CLICK TO ENTER (no passwords)
 # ===============================
-ADMIN_USER = "admin@capnow"
-ADMIN_PASS = "admin2025"
-
 
 def login_widget():
     auth = st.session_state[KEY_AUTH]
     if auth["role"]:
         with st.sidebar:
-            st.markdown(f"**Logged in as:** `{auth['user']}` · **Role:** `{auth['role']}`")
+            st.markdown(f"**Logged in as:** `{auth['user'] or auth['role']}` · **Role:** `{auth['role']}`")
             if st.button("Log out"):
                 st.session_state[KEY_AUTH] = {"role": None, "user": None}
                 st.rerun()
         return
 
-    with st.sidebar.expander("Login", expanded=True):
-        role = st.selectbox("Role", ["admin", "investor"])
-        email = st.text_input("Email / Username")
-        password = st.text_input("Password (demo)", type="password")
-        if st.button("Sign in"):
-            if role == "admin" and email == ADMIN_USER and password == ADMIN_PASS:
-                st.session_state[KEY_AUTH] = {"role": "admin", "user": email}
+    with st.sidebar.expander("Enter", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("↪ Admin"):
+                st.session_state[KEY_AUTH] = {"role": "admin", "user": "admin"}
                 st.rerun()
-            elif role == "investor" and email:
-                st.session_state[KEY_AUTH] = {"role": "investor", "user": email}
+        with col2:
+            if st.button("↪ Investor"):
+                st.session_state[KEY_AUTH] = {"role": "investor", "user": "guest@investor"}
                 st.rerun()
-            else:
-                st.warning("Invalid credentials (demo admin: admin@capnow / admin2025)")
 
-# celebration helper
+# celebration
 
 def celebrate_reach_100k():
     st.balloons()
@@ -278,7 +383,7 @@ def celebrate_reach_100k():
 def page_admin():
     st.markdown("## 💠 Admin — Portfolio Studio")
 
-    tabs = st.tabs(["Raise Capital", "Participation Queue", "Deal Studio", "Run Simulation"])  # flow
+    tabs = st.tabs(["Raise Capital", "Participation Queue", "Deal Studio", "Ledger (continuous)", "Run / Finalize"])  # flow
 
     # --- Raise Capital ---
     with tabs[0]:
@@ -286,18 +391,13 @@ def page_admin():
         investors = st.session_state[KEY_INVESTORS]
         port = st.session_state[KEY_PORT]
 
-        # Add investor manually
         with st.expander("Add Investor (manual)"):
             c1, c2, c3 = st.columns(3)
-            with c1:
-                name = st.text_input("Name", key="adm_name")
-            with c2:
-                email = st.text_input("Email", key="adm_email")
-            with c3:
-                contribution = st.number_input("Contribution $", min_value=0.0, step=1000.0, key="adm_contrib")
+            with c1: name = st.text_input("Name", key="adm_name")
+            with c2: email = st.text_input("Email", key="adm_email")
+            with c3: contribution = st.number_input("Contribution $", min_value=0.0, step=1000.0, key="adm_contrib")
             c4, c5 = st.columns(2)
-            with c4:
-                auto_trim = st.checkbox("Auto-trim to fill $100k", value=True)
+            with c4: auto_trim = st.checkbox("Auto-trim to fill $100k", value=True)
             with c5:
                 if st.button("Add / Update"):
                     if not name or contribution < DEFAULTS.MIN_TICKET:
@@ -313,7 +413,6 @@ def page_admin():
                             investors.append({"name": name, "email": email, "contribution": float(amt)})
                         st.success("Investor saved.")
 
-        # Cap table & progress
         df = cap_table_df(investors, DEFAULTS.TARGET_CAPITAL)
         total = df["Contribution"].sum() if not df.empty else 0.0
         launched = port.get("launched", False)
@@ -321,10 +420,10 @@ def page_admin():
 
         nice = df.copy()
         if not nice.empty:
-            nice["Contribution"], nice["% Ownership"], nice["Entry Fee ($500)"], nice["Net Investable"] = (
-                nice["Contribution"].map(dollars), (nice["% Ownership"]*100).map(lambda v: f"{v:.2f}%"),
-                nice["Entry Fee ($500)"].map(dollars), nice["Net Investable"].map(dollars)
-            )
+            nice["Contribution"] = nice["Contribution"].map(dollars)
+            nice["% Ownership"] = (nice["% Ownership"]*100).map(lambda v: f"{v:.2f}%")
+            nice["Entry Fee ($500)"] = nice["Entry Fee ($500)"].map(dollars)
+            nice["Net Investable"] = nice["Net Investable"].map(dollars)
         st.dataframe(nice, use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
@@ -338,11 +437,13 @@ def page_admin():
                 celebrate_reach_100k()
                 if st.button("🚀 Launch Portfolio (lock roster)"):
                     st.session_state[KEY_PORT]["launched"] = True
-                    st.success("Portfolio launched.")
+                    # seed ledger cash with target capital
+                    st.session_state[KEY_CASH] = DEFAULTS.TARGET_CAPITAL
+                    st.success("Portfolio launched. Ledger initialized with $100,000 available.")
             else:
                 st.info("Launch is enabled when total committed equals $100,000.")
         else:
-            st.success("Portfolio is live. You can still play scenarios in the Deal Studio; distributions are computed at year end.")
+            st.success("Portfolio is live. Use the Ledger tab to deploy & advance time.")
 
     # --- Participation Queue ---
     with tabs[1]:
@@ -356,8 +457,7 @@ def page_admin():
                 rdf = rdf.rename(columns={"requested_amount": "Requested $"})
                 rdf["Requested $"] = rdf["Requested $"] .map(dollars)
             st.dataframe(rdf, use_container_width=True)
-
-            for idx, r in enumerate(reqs):
+            for idx, r in enumerate(list(reqs)):
                 colA, colB, colC, colD = st.columns([3,2,1,1])
                 with colA: st.write(f"**{r['name']}** · {r.get('email','')} · Request: {dollars(r['requested_amount'])}")
                 with colB: trim = st.checkbox(f"Auto-trim to remaining", key=f"trim_{idx}", value=True)
@@ -368,15 +468,15 @@ def page_admin():
                         remaining = DEFAULTS.TARGET_CAPITAL - total_now
                         amt = min(r["requested_amount"], remaining) if trim else r["requested_amount"]
                         invs.append({"name": r["name"], "email": r.get("email",""), "contribution": float(amt)})
-                        reqs.pop(idx); st.rerun()
+                        reqs.remove(r); st.rerun()
                 with colD:
                     if st.button("Reject", key=f"reject_{idx}"):
-                        reqs.pop(idx); st.rerun()
+                        reqs.remove(r); st.rerun()
 
-    # --- Deal Studio ---
+    # --- Deal Studio (discrete, optional) ---
     with tabs[2]:
-        st.markdown("#### Deal Studio (build your year)")
-        st.caption("Add deals with their own size, factor and duration. Early skim applies on completed deals; defaults are absorbed by portfolio.")
+        st.markdown("#### Deal Studio (discrete cycles — optional sandbox)")
+        st.caption("A simpler sandbox: build a list of deals and simulate sequentially.")
 
         with st.expander("Quick Builder"):
             c1, c2, c3, c4 = st.columns(4)
@@ -417,27 +517,76 @@ def page_admin():
         )
         st.session_state[KEY_DEALS] = edited.fillna({"factor": DEFAULTS.FACTOR_FALLBACK, "size_amt": 0, "days": 60, "default": False}).to_dict(orient="records")
 
-    # --- Run Simulation ---
+    # --- Ledger (continuous) ---
     with tabs[3]:
-        st.markdown("#### Run Simulation (Model B)")
-        investors = st.session_state[KEY_INVESTORS]
-        deals = st.session_state.get(KEY_DEALS, [])
-        cap = DEFAULTS.TARGET_CAPITAL
-        fees_total = len(investors) * DEFAULTS.FLAT_FEE_PER_INVESTOR
-        tl, profit, early = simulate_model_b(cap, deals, DEFAULTS.CAPNOW_EARLY, DEFAULTS.BD_PER_YEAR)
-        inv_total, capnow_total, capnow_final = final_splits(cap, profit, early, DEFAULTS.CAPNOW_TOTAL, fees_total)
+        st.markdown("#### Ledger — Continuous Cash Flow (daily collections)")
+        port = st.session_state[KEY_PORT]
+        if not port.get("launched", False):
+            st.info("Launch the portfolio in Raise Capital to initialize $100,000 cash.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("Day", st.session_state[KEY_DAY])
+        with c2: st.metric("Available Cash", dollars(st.session_state[KEY_CASH]))
+        with c3: st.metric("Outstanding Principal", dollars(ledger_outstanding_principal()))
+        with c4: st.metric("CapNow Early Skims", dollars(st.session_state[KEY_SKIM]))
 
-        if not tl.empty:
-            pretty = tl.copy()
-            for col in ["start_principal", "deployed", "profit", "capnow_early", "reinvested", "end_principal"]:
-                pretty[col] = pretty[col].map(dollars)
-            pretty["completion"] = (pretty["completion"]*100).map(lambda v: f"{v:.0f}%")
-            st.dataframe(pretty, use_container_width=True)
+        st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+        # Controls: advance day & add deal
+        colA, colB = st.columns([2,3])
+        with colA:
+            target = st.slider("Advance to business day", min_value=0, max_value=DEFAULTS.BD_PER_YEAR, value=st.session_state[KEY_DAY], step=1)
+            if st.button("Advance"):
+                ledger_advance_to_day(target)
+        with colB:
+            st.markdown("**Start New Deal (at current day)**")
+            d1, d2, d3, d4, d5 = st.columns(5)
+            with d1: label = st.text_input("label", value=f"Deal {len(st.session_state[KEY_LEDGER])+1}")
+            with d2: amt = st.number_input("amount $", min_value=0.0, value=10_000.0, step=1000.0)
+            with d3: factor = st.number_input("factor", min_value=1.0, value=1.40, step=0.01, format="%.2f")
+            with d4: term = st.number_input("term (biz days)", min_value=1, value=90, step=5)
+            with d5: dflt = st.checkbox("default?", value=False)
+            if st.button("Deploy now"):
+                ok = ledger_add_deal(label, amt, factor, term, st.session_state[KEY_DAY], dflt)
+                if ok:
+                    st.success("Deal deployed.")
+
+        # Ledger table
+        ldf = ledger_dataframe()
+        if not ldf.empty:
+            show = ldf.copy()
+            for c in ["amount","daily","gross","collected"]:
+                show[c] = show[c].map(dollars)
+            st.dataframe(show, use_container_width=True)
         else:
-            st.info("Add deals in the Deal Studio to simulate.")
+            st.info("No deals in ledger yet. Deploy one to start daily collections.")
+
+        # Quick actions
+        cqa1, cqa2, cqa3 = st.columns(3)
+        with cqa1:
+            if st.button("Advance 10 days"):
+                ledger_advance_to_day(min(DEFAULTS.BD_PER_YEAR, st.session_state[KEY_DAY] + 10))
+        with cqa2:
+            if st.button("Advance 30 days"):
+                ledger_advance_to_day(min(DEFAULTS.BD_PER_YEAR, st.session_state[KEY_DAY] + 30))
+        with cqa3:
+            if st.button("Reset Ledger"):
+                st.session_state[KEY_LEDGER] = []
+                st.session_state[KEY_DAY] = 0
+                st.session_state[KEY_CASH] = DEFAULTS.TARGET_CAPITAL if port.get("launched", False) else 0.0
+                st.session_state[KEY_SKIM] = 0.0
+                st.success("Ledger reset.")
+
+    # --- Run / Finalize ---
+    with tabs[4]:
+        st.markdown("#### Run / Finalize Year")
+        investors = st.session_state[KEY_INVESTORS]
+        fees_total = len(investors) * DEFAULTS.FLAT_FEE_PER_INVESTOR
+
+        realized_profit = ledger_realized_profit()
+        early = st.session_state[KEY_SKIM]
+        inv_total, capnow_total, capnow_final = final_splits(DEFAULTS.TARGET_CAPITAL, realized_profit, early, DEFAULTS.CAPNOW_TOTAL, fees_total)
 
         c1, c2, c3 = st.columns(3)
-        with c1: st.metric("Total Realized Profit", dollars(profit))
+        with c1: st.metric("Realized Profit (YTD)", dollars(realized_profit))
         with c2: st.metric("CapNow Early Skims (sum)", dollars(early))
         with c3: st.metric("CapNow Final Component", dollars(capnow_final))
 
@@ -446,7 +595,7 @@ def page_admin():
         with c5: st.metric("CapNow – All-in (incl. fees)", dollars(capnow_total))
         with c6: st.metric("Fees Collected ($500 × N)", dollars(fees_total))
 
-        cap_df = cap_table_df(investors, cap)
+        cap_df = cap_table_df(investors, DEFAULTS.TARGET_CAPITAL)
         pay = payouts_df(cap_df, inv_total)
         if not pay.empty:
             nice = pay.copy()
@@ -465,8 +614,7 @@ def page_admin():
 
 def page_investor():
     st.markdown("## 💫 Investor Portal")
-    auth = st.session_state[KEY_AUTH]
-    email = auth.get("user") or ""
+    email = st.session_state[KEY_AUTH].get("user") or ""
 
     tabs = st.tabs(["Participate", "My Portfolio"]) 
 
@@ -490,12 +638,12 @@ def page_investor():
             st.info("No approved investment on record for this login.")
             return
 
-        cap_df = cap_table_df(st.session_state[KEY_INVESTORS], DEFAULTS.TARGET_CAPITAL)
         deals = st.session_state.get(KEY_DEALS, [])
         tl, profit, early = simulate_model_b(DEFAULTS.TARGET_CAPITAL, deals, DEFAULTS.CAPNOW_EARLY, DEFAULTS.BD_PER_YEAR)
         inv_total, capnow_total, capnow_final = final_splits(DEFAULTS.TARGET_CAPITAL, profit, early, DEFAULTS.CAPNOW_TOTAL, len(st.session_state[KEY_INVESTORS]) * DEFAULTS.FLAT_FEE_PER_INVESTOR)
-        pay = payouts_df(cap_df, inv_total)
 
+        cap_df = cap_table_df(st.session_state[KEY_INVESTORS], DEFAULTS.TARGET_CAPITAL)
+        pay = payouts_df(cap_df, inv_total)
         my = pay[pay["Email"] == email]
         if my.empty:
             st.info("You're not in the latest cap table yet. Check back after approval.")
@@ -509,7 +657,7 @@ def page_investor():
         with c4: st.metric("ROI %", f"{row['ROI %']:.2f}%")
 
         st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
-        st.markdown("**Portfolio Performance (Latest Simulation)**")
+        st.markdown("**Portfolio Performance (Discrete Sandbox)**")
         if not tl.empty:
             pretty = tl.copy()
             for col in ["start_principal", "deployed", "profit", "capnow_early", "reinvested", "end_principal"]:
@@ -517,13 +665,33 @@ def page_investor():
             pretty["completion"] = (pretty["completion"]*100).map(lambda v: f"{v:.0f}%")
             st.dataframe(pretty, use_container_width=True)
         else:
-            st.info("Admin has not added deals to simulate yet.")
+            st.info("Admin has not added deals to the discrete sandbox.")
 
 # ===============================
 # ROUTER
 # ===============================
 init_state()
-login_widget()
+
+# click-to-enter auth
+auth = st.session_state[KEY_AUTH]
+if not auth["role"]:
+    with st.sidebar.expander("Enter", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("↪ Admin"):
+                st.session_state[KEY_AUTH] = {"role": "admin", "user": "admin"}
+                st.rerun()
+        with col2:
+            if st.button("↪ Investor"):
+                st.session_state[KEY_AUTH] = {"role": "investor", "user": "guest@investor"}
+                st.rerun()
+else:
+    with st.sidebar:
+        st.markdown(f"**Logged in as:** `{auth['user'] or auth['role']}` · **Role:** `{auth['role']}`")
+        if st.button("Log out"):
+            st.session_state[KEY_AUTH] = {"role": None, "user": None}
+            st.rerun()
+
 role = st.session_state[KEY_AUTH]["role"]
 
 if role == "admin":
@@ -532,9 +700,7 @@ elif role == "investor":
     page_investor()
 else:
     st.markdown("## 💠 CapNow — Portfolio Simulator (Model B)")
-    st.write("Use the sidebar to **log in** as admin or investor.")
-    st.markdown("- Admin demo: **admin@capnow / admin2025**")
-    st.markdown("- Investor: enter any email (no password in demo)")
+    st.write("Use the sidebar to **enter** as admin or investor.")
     st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
     st.markdown("**Highlights**")
     st.markdown("- Target: $100,000 · Min ticket $5,000 · $500 entry fee per investor")
