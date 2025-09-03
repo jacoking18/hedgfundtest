@@ -1,7 +1,7 @@
 # streamlit_app.py
 # ------------------------------------------------------------
 # CapNow — Portfolio Syndication Simulator (Model B)
-# FINTECH-STYLE UI (2025) • AI-ish polish • ZERO logic changes
+# FINTECH-STYLE UI (2025) • Light Grey Theme • ZERO logic changes
 # - Same business logic & behavior; only visuals/components improved.
 # - Click-to-enter roles (no passwords)
 # - Continuous Cash Flow Ledger (daily collections) preserved
@@ -16,53 +16,43 @@ import pandas as pd
 import streamlit as st
 
 # ===============================
-# THEME / STYLES — Fintech Dark (blue) + micro-animations
+# THEME / STYLES — Light Grey Fintech
 # ===============================
 st.set_page_config(page_title="CapNow – Portfolio Simulator (Model B)", page_icon="💠", layout="wide")
 
-FINTECH_CSS = """
+LIGHT_GREY_CSS = """
 <style>
 :root{
-  --bg0:#070e1f; --bg1:#0c1a3a; --grid:#0e204c; --card:#0d1531; --card2:#121b3b;
-  --accent:#5aa6ff; --accent2:#00e0ff; --accent3:#82ffd2; --warn:#ffc658; --error:#ff6b6b;
-  --txt:#e9efff; --muted:#a6b2d9; --border:#1b2a5e;
+  --bg0:#f6f7fb; --bg1:#ffffff; --grid:#e6e9ef; --card:#ffffff; --card2:#f0f2f7;
+  --accent:#3a7bd5; --accent2:#00c6ff; --accent3:#82ffd2; --warn:#ffc658; --error:#ff6b6b;
+  --txt:#0f172a; --muted:#6b7280; --border:#d7deea;
 }
+
 /* background */
-[data-testid="stAppViewContainer"]{color:var(--txt);background:
- radial-gradient(1200px 700px at 10% -10%, #0f2150 0%, var(--bg0) 60%),
- linear-gradient(180deg, rgba(0,0,0,.25), rgba(0,0,0,.25));}
-[data-testid="stAppViewContainer"]:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.3;
-  background-image:linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px),
-                   linear-gradient(0deg, rgba(255,255,255,.06) 1px, transparent 1px);
-  background-size:48px 48px,48px 48px;animation:drift 55s linear infinite;}
-@keyframes drift{0%{background-position:0 0,0 0}100%{background-position:480px 480px,480px 480px}}
+[data-testid="stAppViewContainer"]{color:var(--txt);background:var(--bg0);} 
 
 /* layout */
 .block-container{padding-top:.6rem}
 section.main > div{padding-top:.25rem}
 
 /* cards + inputs */
-.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1rem}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem}
 .card.alt{background:var(--card2)}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1rem}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem}
 .rule{border-top:1px dashed var(--border);margin:.75rem 0}
-.badge{display:inline-flex;gap:.4rem;align-items:center;background:rgba(90,166,255,.16);color:#cfe0ff;border:1px solid rgba(90,166,255,.28);padding:.22rem .6rem;border-radius:999px;font-weight:600}
+.badge{display:inline-flex;gap:.4rem;align-items:center;background:rgba(58,123,213,.10);color:var(--txt);border:1px solid rgba(58,123,213,.28);padding:.22rem .6rem;border-radius:999px;font-weight:600}
 
-.stButton>button,.stDownloadButton>button{border:0;border-radius:12px;padding:.6rem 1rem;font-weight:700;color:#04122d;
- background:linear-gradient(135deg,var(--accent) 0%,var(--accent2) 100%);} 
+.stButton>button,.stDownloadButton>button{border:0;border-radius:8px;padding:.55rem 1rem;font-weight:600;color:#fff;background:linear-gradient(135deg,var(--accent) 0%,var(--accent2) 100%);} 
 .stButton>button:hover{filter:brightness(1.06)}
 
-/* headers */
-h1,h2,h3{color:var(--txt)!important}
-
-/* dataframe container */
-[data-testid="stDataFrame"]{background:var(--card);border:1px solid var(--border)}
+/* table container */
+[data-testid="stDataFrame"]{background:var(--card);border:1px solid var(--border);color:var(--txt)}
 
 /* sidebar login tiles */
-.login-tile{display:block;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:.9rem .8rem;transition:transform .08s ease, filter .2s ease}
+.login-tile{display:block;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.7rem .6rem;transition:transform .08s ease, filter .2s ease}
 .login-tile:hover{transform:translateY(-2px);filter:brightness(1.04)}
-.login-tile .em{display:block;font-size:1.05rem;font-weight:800}
-.login-tile .sm{display:block;color:var(--muted);font-size:.85rem}
+.login-tile .em{display:block;font-size:1rem;font-weight:700;color:var(--txt)}
+.login-tile .sm{display:block;color:var(--muted);font-size:.8rem}
 
 /* celebration */
 .pop-wrap{display:flex;gap:10px;align-items:center;margin:.3rem 0 .6rem 0}
@@ -71,7 +61,7 @@ h1,h2,h3{color:var(--txt)!important}
 @keyframes pop{0%{transform:translateY(10px) scale(.6) rotate(-10deg);opacity:0}50%{opacity:1}100%{transform:translateY(-3px) scale(1.03) rotate(0)} }
 </style>
 """
-st.markdown(FINTECH_CSS, unsafe_allow_html=True)
+st.markdown(LIGHT_GREY_CSS, unsafe_allow_html=True)
 
 # ===============================
 # CONFIG & CONSTANTS (unchanged)
