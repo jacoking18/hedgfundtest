@@ -3,14 +3,15 @@
 # CapNow — Portfolio Syndication Simulator (Model B)
 # FINTECH-STYLE UI (2025) • Light Grey Theme • ZERO logic changes
 # - Same business logic & behavior; only visuals/components improved.
-# - Click-to-enter roles (no passwords)
-# - Continuous Cash Flow Ledger (daily collections) preserved
+# - Adds: Ledger start date picker + date jump (US business days)
+# - Adds: Supabase persistence (investors, requests, ledger_deals)
 # ------------------------------------------------------------
 
 from __future__ import annotations
 import math
 from dataclasses import dataclass, asdict
 from typing import List, Dict
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -79,7 +80,7 @@ class AppDefaults:
 DEFAULTS = AppDefaults()
 
 # ===============================
-# STATE (unchanged)
+# STATE (unchanged business logic; adds start_date only)
 # ===============================
 KEY_AUTH = "auth"
 KEY_INVESTORS = "investors"
@@ -91,6 +92,8 @@ KEY_LEDGER = "ledger_deals"       # list of deals in ledger
 KEY_DAY = "ledger_day"            # current business day index (0..252)
 KEY_CASH = "ledger_cash"          # available cash
 KEY_SKIM = "ledger_early_skim"    # capnow early skim accumulated
+# New (UI only): start date to map business days → calendar dates
+KEY_STARTDATE = "ledger_start_date"
 
 
 def init_state():
@@ -112,6 +115,8 @@ def init_state():
         st.session_state[KEY_CASH] = 0.0
     if KEY_SKIM not in st.session_state:
         st.session_state[KEY_SKIM] = 0.0
+    if KEY_STARTDATE not in st.session_state:
+        st.session_state[KEY_STARTDATE] = date.today()
 
 # ===============================
 # UTIL — MONEY / PERCENT (unchanged)
@@ -128,6 +133,33 @@ def percent(x: float) -> str:
         return f"{x*100:.2f}%"
     except Exception:
         return "0.00%"
+
+# ===============================
+# DATE MAPPING (UI helper; does not affect ledger math)
+# ===============================
+from pandas.tseries.holiday import USFederalHolidayCalendar
+from pandas.tseries.offsets import CustomBusinessDay
+
+_CB = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+
+def bizday_to_date(start: date, day_index: int) -> date:
+    try:
+        ts = pd.Timestamp(start) + (day_index * _CB)
+        return ts.date()
+    except Exception:
+        return start
+
+def date_to_biz_index(start: date, target: date) -> int:
+    try:
+        start_ts = pd.Timestamp(start)
+        target_ts = pd.Timestamp(target)
+        if target_ts < start_ts:
+            return 0
+        rng = pd.date_range(start=start_ts, end=target_ts, freq=_CB)
+        # day 0 = start date
+        return max(0, len(rng) - 1)
+    except Exception:
+        return 0
 
 # ===============================
 # MODEL B — DISCRETE ENGINE (unchanged)
@@ -285,6 +317,79 @@ def celebrate_reach_100k():
     st.markdown('<div class="pop-wrap"><span class="glove">🥊</span><span class="glove">🥊</span><span class="glove">🥊</span></div>', unsafe_allow_html=True)
 
 # ===============================
+# SUPABASE (persistence) — additive, no logic change
+# ===============================
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
+@st.cache_resource
+def sb_admin() -> Client | None:
+    try:
+        if create_client is None:
+            return None
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not key:
+            return None
+        return create_client(url, key)
+    except Exception:
+        return None
+
+SUPA_ENABLED = sb_admin() is not None
+
+# Writers (safe no-ops if Supabase not configured)
+
+def upsert_investors_list(investors: List[Dict]) -> None:
+    if not SUPA_ENABLED or not investors:
+        return
+    payload = []
+    for i in investors:
+        payload.append({
+            "name": i.get("name", ""),
+            "email": i.get("email", ""),
+            "contribution": float(i.get("contribution", 0) or 0),
+        })
+    try:
+        sb_admin().table("investors").upsert(payload, on_conflict="email").execute()
+    except Exception:
+        pass
+
+
+def insert_request_row(name: str, email: str, amount: float) -> None:
+    if not SUPA_ENABLED:
+        return
+    try:
+        sb_admin().table("requests").insert({
+            "name": name,
+            "email": email,
+            "requested_amount": float(amount or 0),
+        }).execute()
+    except Exception:
+        pass
+
+
+def insert_ledger_deal_row(deal: Dict) -> None:
+    if not SUPA_ENABLED or not deal:
+        return
+    try:
+        sb_admin().table("ledger_deals").insert({
+            "label": deal.get("label", "Deal"),
+            "amount": float(deal.get("amount", 0) or 0),
+            "factor": float(deal.get("factor", 1.0) or 1.0),
+            "term": int(deal.get("term", 0) or 0),
+            "start_day": int(deal.get("start_day", 0) or 0),
+            "end_day": int(deal.get("end_day", 0) or 0),
+            "collected": float(deal.get("collected", 0) or 0),
+            "completed": bool(deal.get("completed", False)),
+            "defaulted": bool(deal.get("default", False)),
+        }).execute()
+    except Exception:
+        pass
+
+# ===============================
 # ADMIN PAGES (UI polish only)
 # ===============================
 
@@ -317,6 +422,8 @@ def page_admin():
                             amt = min(contribution, remaining) if auto_trim else contribution
                             investors.append({"name": name, "email": email, "contribution": float(amt)})
                         st.success("Investor saved.")
+                        # NEW: upsert to Supabase (no logic change)
+                        upsert_investors_list(st.session_state[KEY_INVESTORS])
 
         df = cap_table_df(investors, DEFAULTS.TARGET_CAPITAL)
         total = df["Contribution"].sum() if not df.empty else 0.0
@@ -423,19 +530,31 @@ def page_admin():
         port = st.session_state[KEY_PORT]
         if not port.get("launched", False):
             st.info("Launch the portfolio in Raise Capital to initialize $100,000 cash.")
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c0, c1, c2, c3, c4, c5 = st.columns(6)
+        with c0:
+            # NEW: start date picker (UI only)
+            sd = st.date_input("Start date", value=st.session_state[KEY_STARTDATE], help="Used to map business days to calendar (US holidays excluded)")
+            if sd != st.session_state[KEY_STARTDATE]:
+                st.session_state[KEY_STARTDATE] = sd
         with c1: st.metric("Day", st.session_state[KEY_DAY])
-        with c2: st.metric("Available Cash", dollars(st.session_state[KEY_CASH]))
-        with c3: st.metric("Outstanding Principal", dollars(ledger_outstanding_principal()))
-        with c4: st.metric("To Be Collected", dollars(ledger_to_be_collected()))
+        with c2: st.metric("Simulated Date", bizday_to_date(st.session_state[KEY_STARTDATE], st.session_state[KEY_DAY]).strftime("%b %d, %Y"))
+        with c3: st.metric("Available Cash", dollars(st.session_state[KEY_CASH]))
+        with c4: st.metric("Outstanding Principal", dollars(ledger_outstanding_principal()))
         with c5: st.metric("CapNow Early Skims", dollars(st.session_state[KEY_SKIM]))
 
         st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+        # Controls: advance day & add deal
         colA, colB = st.columns([2,3])
         with colA:
             target = st.slider("Advance to business day", min_value=0, max_value=DEFAULTS.BD_PER_YEAR, value=st.session_state[KEY_DAY], step=1)
             if st.button("Advance"):
                 ledger_advance_to_day(target)
+            # NEW: jump by calendar date (does not alter math; just computes index)
+            jump_date = st.date_input("Jump to date", value=bizday_to_date(st.session_state[KEY_STARTDATE], st.session_state[KEY_DAY]))
+            if st.button("Go to date"):
+                idx = date_to_biz_index(st.session_state[KEY_STARTDATE], jump_date)
+                idx = min(max(0, idx), DEFAULTS.BD_PER_YEAR)
+                ledger_advance_to_day(idx)
         with colB:
             st.markdown("**Start New Deal (at current day)**")
             d1, d2, d3, d4, d5 = st.columns(5)
@@ -446,8 +565,12 @@ def page_admin():
             with d5: dflt = st.checkbox("default?", value=False)
             if st.button("Deploy now"):
                 ok = ledger_add_deal(label, amt, factor, term, st.session_state[KEY_DAY], dflt)
-                if ok: st.success("Deal deployed.")
+                if ok:
+                    st.success("Deal deployed.")
+                    # NEW: persist deployment
+                    insert_ledger_deal_row(st.session_state[KEY_LEDGER][-1])
 
+        # Ledger table
         ldf = ledger_dataframe()
         if not ldf.empty:
             show = ldf.copy()
@@ -456,6 +579,7 @@ def page_admin():
         else:
             st.info("No deals in ledger yet. Deploy one to start daily collections.")
 
+        # Quick actions
         cqa1, cqa2, cqa3 = st.columns(3)
         with cqa1:
             if st.button("Advance 10 days"): ledger_advance_to_day(min(DEFAULTS.BD_PER_YEAR, st.session_state[KEY_DAY] + 10))
@@ -513,6 +637,8 @@ def page_investor():
             else:
                 st.session_state[KEY_REQUESTS].append({"name": name, "email": req_email, "requested_amount": float(amt)})
                 st.success("Request submitted. The admin will review and approve.")
+                # NEW: persist request (no logic change)
+                insert_request_row(name, req_email, amt)
     with tabs[1]:
         st.markdown("### My Portfolio")
         invs = [i for i in st.session_state[KEY_INVESTORS] if i.get("email") == email]
@@ -563,6 +689,11 @@ else:
         st.markdown(f"**Logged in as:** `{auth['user'] or auth['role']}` · **Role:** `{auth['role']}`")
         if st.button("Log out", use_container_width=True):
             st.session_state[KEY_AUTH] = {"role": None, "user": None}; st.rerun()
+    # Small indicator for Supabase status (UI only)
+    if SUPA_ENABLED:
+        st.sidebar.success("DB: Supabase connected")
+    else:
+        st.sidebar.info("DB: Supabase not configured")
 
 role = st.session_state[KEY_AUTH]["role"]
 if role == "admin":
