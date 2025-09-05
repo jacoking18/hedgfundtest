@@ -389,6 +389,24 @@ def insert_ledger_deal_row(deal: Dict) -> None:
     except Exception:
         pass
 
+
+def save_portfolio_run(summary, deals, payouts, capnow_earnings):
+    if not SUPA_ENABLED:
+        st.warning("Supabase is not enabled.")
+        return
+    try:
+        sb_admin().table("portfolio_runs").insert({
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "summary": summary,             # dict
+            "deals": deals,                 # list of dicts
+            "payouts": payouts,             # list of dicts
+            "capnow_earnings": float(capnow_earnings),
+        }).execute()
+        st.success("Portfolio run saved to Supabase!")
+    except Exception as e:
+        st.warning(f"Failed to save run: {e}")
+
+
 # ===============================
 # ADMIN PAGES (UI polish only)
 # ===============================
