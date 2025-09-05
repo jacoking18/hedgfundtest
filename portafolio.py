@@ -635,6 +635,27 @@ def page_admin():
         else:
             st.info("No investors yet.")
 
+        st.dataframe(nice, use_container_width=True)
+
+        # ----- Save Portfolio Run to Supabase -----
+        summary = {
+            "realized_profit": float(realized_profit),
+            "capnow_early": float(early),
+            "capnow_final_component": float(capnow_final),
+            "investors_total_distribution": float(inv_total),
+            "capnow_total": float(capnow_total),
+            "fees_total": float(fees_total),
+        }
+        deals_list = ldf.to_dict(orient="records") if 'ldf' in locals() else []
+        payouts_list = pay.to_dict(orient="records") if not pay.empty else []
+        if st.button("💾 Save Portfolio Run"):
+            save_portfolio_run(
+                summary=summary,
+                deals=deals_list,
+                payouts=payouts_list,
+                capnow_earnings=capnow_total
+            )
+
 # ===============================
 # INVESTOR PAGES (UI polish only)
 # ===============================
